@@ -23,19 +23,24 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 
+import io.jsonwebtoken.*;
+
 import org.jboss.logging.Logger;
 
-import java.util.HashMap;
-import java.util.Collections;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.security.cert.X509Certificate;
 import java.security.cert.CertificateFactory;
-import java.util.ArrayList;
+import java.security.KeyFactory;
+import java.security.PrivateKey;
+import java.security.spec.*;
 import java.net.URL;
-import java.io.FileInputStream;
+import java.net.URI;
+import java.net.HttpURLConnection;
+import java.net.URLEncoder;
+import java.io.*;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+
 
 /**
  * @author <a href="mailto:markus@life-electronic.nl">Markus Pfundstein</a>
@@ -47,6 +52,9 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
     public static final String PROVIDER_ID = "client-ishare";
 
     private String keycloakOperatorPartyId;
+    private String keycloakOperatorCert;
+    private PrivateKey keycloakOperatorPrivateKey;
+    
     private String iSHARESatellitePartyId;
     private String iSHARESatelliteBaseUrl;
     private X509Certificate iSHARE_CA;
@@ -135,6 +143,110 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
         return;
     }
 
+    private String getParamsString(Map<String, String> params) throws java.io.UnsupportedEncodingException {
+        StringBuilder result = new StringBuilder();
+
+        for (Map.Entry<String, String> entry : params.entrySet()) {
+          result.append(URLEncoder.encode(entry.getKey(), "UTF-8"));
+          result.append("=");
+          result.append(URLEncoder.encode(entry.getValue(), "UTF-8"));
+          result.append("&");
+        }
+
+        String resultString = result.toString();
+        return resultString.length() > 0
+          ? resultString.substring(0, resultString.length() - 1)
+          : resultString;
+    }
+
+    private String createSatelliteClientAssertion()
+    {
+        //PrivateKey privateKey = new PrivateKey();
+        Instant now = Instant.now();
+
+        String jwt = Jwts.builder()
+            .header()
+            .add("x5c", keycloakOperatorCert)
+            .and()
+            .setAudience(iSHARESatellitePartyId)
+            .setIssuedAt(Date.from(now))
+            .setExpiration(Date.from(now.plus(30L, ChronoUnit.SECONDS)))
+            .setIssuer(keycloakOperatorPartyId)
+            .setSubject(keycloakOperatorPartyId)
+            .setNotBefore(Date.from(now))
+            .setId(UUID.randomUUID().toString())
+            .signWith(keycloakOperatorPrivateKey)
+            .compact();
+
+        return jwt;
+    }
+    
+    private String getAccessTokenFromSatellite() throws Exception
+    {
+        String grant_type = "client_credentials";
+        String client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+        String client_id = keycloakOperatorPartyId;
+        String scope = "iSHARE";
+        String client_assertion = createSatelliteClientAssertion();
+        log.debugf("Call Satellite with client_assertion: %s", client_assertion);
+
+        String tokenURL = iSHARESatelliteBaseUrl.concat("/connect/token");
+
+        URL url = new URL(tokenURL);
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod("POST");        
+        connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        connection.setRequestProperty("Accept", "application/json");
+        
+        Map<String, String> parameters = new HashMap<>();
+        parameters.put("grant_type", grant_type);
+        parameters.put("client_assertion_type", client_assertion_type);
+        parameters.put("client_assertion", client_assertion);
+        parameters.put("scope", scope);
+        parameters.put("client_id", client_id);
+
+        connection.setDoOutput(true);
+        DataOutputStream out = new DataOutputStream(connection.getOutputStream());
+        out.writeBytes(getParamsString(parameters));
+        out.flush();
+        out.close();
+
+        int status = connection.getResponseCode();
+        log.debugf("Satellite response status: %d", status);
+
+        if (status == 200) {
+            /* on success: 200 OK with { access_token, token_type, expires_in } */
+            /* on missing client_assertion: 200 OK with { status: false, message } */
+            BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()));
+            String inputLine;
+            StringBuffer content = new StringBuffer();
+            while ((inputLine = reader.readLine()) != null) {
+                content.append(inputLine);
+            }
+            reader.close();
+
+            log.debugf("iSHARE Response: %s", content.toString());
+            
+            ISHARESatelliteResponse resp = JsonSerialization.readValue(content.toString(), ISHARESatelliteResponse.class);
+            if (resp.access_token == null || resp.access_token.isEmpty()) {
+                // no access token means error
+                log.errorf("Couldn't obtain token from Satellite: %s", resp.message != null ? resp.message : "unknown error");
+                return null;
+            }
+            return resp.access_token;
+        } else {
+            log.errorf("Satellite returned error. Statuscode: %d", status);
+            return null;
+        }
+    }
+
+    private boolean verifyCallingPartyAtSatellite(String callingPartyId) throws Exception
+    {
+        String access_token = getAccessTokenFromSatellite();
+
+        return true;
+    }
+
     private boolean validateClientAssertion(String client_assertion)
     {
         try {
@@ -158,10 +270,10 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
             }
             log.debug("----------------");
 
-            // to do: make full chain
-            List<X509Certificate> chain = new ArrayList<>();
             X509Certificate cert = PemUtils.decodeCertificate(x5c[0]);
-            chain.add(cert);
+
+            //List<X509Certificate> chain = new ArrayList<>();
+            //chain.add(cert);
 
             cert.verify(iSHARE_CA.getPublicKey());
             
@@ -174,16 +286,8 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
                 log.error("invalid aud");
                 return false;
             }
-            // 0. validate jwt certificate
-            
-            // 1. Check if Keycloak operator is aud
-           
-            // if (keycloakOperatorPartyId not in aud) {
-            //   throw
-            // }
 
-            // 2. validate sub at iSHARE satellite
-            return true;
+            return verifyCallingPartyAtSatellite(token.getSubject());
         } catch (Exception e) {
             log.errorf("Exception validating client_assertion: %s", e.toString());
         }        
@@ -194,24 +298,65 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
     public void init(Config.Scope config) {
         super.init(config);
 
+        //String test = config.get("testval", "");
+        //log.debugf("TEST CONFIG VAL: %s", test);
+        
         keycloakOperatorPartyId = "NL.EORI.LIFEELEC4DMI";
         iSHARESatellitePartyId = "EU.EORI.NLDEXESDMISAT1";
         iSHARESatelliteBaseUrl = "https://satellite-mw.dev.dexes.eu";
 
         try {
-            String u = "/home/markus/clients/dexes/ishare_certs/TESTiSHAREEUIssuingCertificationAuthorityG5-chain.pem";
+            String ca_file = "/home/markus/clients/dexes/ishare_certs/TESTiSHAREEUIssuingCertificationAuthorityG5-chain.pem";
             //String u = "/home/markus/clients/dexes/ishare_certs/Test_iSHARE_EU_Issuing_Certification_Authority_G5.pem";
-            FileInputStream inStream = new FileInputStream(u);
+            FileInputStream inStream = new FileInputStream(ca_file);
             CertificateFactory cf = CertificateFactory.getInstance("X.509");
             iSHARE_CA = (X509Certificate) cf.generateCertificate(inStream);
-            
-        } catch (java.io.FileNotFoundException e) {
-            log.errorf("FileNotFoundException %s", e.toString());
-        } catch (java.security.cert.CertificateException e) {
-            log.errorf("CertificateException (iSHARE cert) %s", e.toString());
+
+            String op_cert_file = "/home/markus/clients/dexes/ishare_certs/lifecert.crt";
+            String op_key_file = "/home/markus/clients/dexes/ishare_certs/lifekey.pem";
+
+            keycloakOperatorCert = getFileContent(new FileInputStream(op_cert_file), "utf-8")
+                .replace("-----BEGIN CERTIFICATE-----", "")
+                .replaceAll(System.lineSeparator(), "")
+                .replace("-----END CERTIFICATE-----", "");
+
+            String privKeyTmp = getFileContent(new FileInputStream(op_key_file), "utf-8");
+            String privateKeyPEM = privKeyTmp
+                .replace("-----BEGIN PRIVATE KEY-----", "")
+                .replaceAll(System.lineSeparator(), "")
+                .replace("-----END PRIVATE KEY-----", "");
+
+            byte[] encoded = Base64.getDecoder().decode(privateKeyPEM);
+
+            KeyFactory keyFactory = KeyFactory.getInstance("RSA");
+            KeySpec keySpec = new PKCS8EncodedKeySpec(encoded);
+            //KeySpec keySpec = new RSAPrivateKeySpec(encoded);
+            keycloakOperatorPrivateKey = keyFactory.generatePrivate(keySpec);
+
+            log.debugf("keycloakOperatorCert :\n%s\n", op_cert_file);
+
+            // to-do: Would be nice to crash that thing when the ca file cant be loaded.
+        } catch (Exception e) {
+            log.errorf("Exception during init %s", e.toString());
         }
+
+        log.info("ISHAREAuthenticator init done");
     }
-    
+
+    public static String getFileContent(FileInputStream fis, String encoding ) throws IOException
+    {
+        try (BufferedReader br = new BufferedReader( new InputStreamReader(fis, encoding )))
+            {
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while(( line = br.readLine()) != null ) {
+                    sb.append( line );
+                    sb.append( '\n' );
+                }
+                return sb.toString();
+            }
+    }
+
     @Override
     public String getDisplayType() {
         return "iSHARE";
