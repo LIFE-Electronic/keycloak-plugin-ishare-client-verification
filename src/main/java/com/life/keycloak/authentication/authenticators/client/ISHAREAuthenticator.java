@@ -196,10 +196,6 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
     
     private String getAccessTokenFromSatellite() throws Exception
     {
-        String grant_type = "client_credentials";
-        String client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
-        String client_id = keycloakOperatorPartyId;
-        String scope = "iSHARE";
         String client_assertion = createSatelliteClientAssertion();
         log.tracef("Call Satellite with client_assertion: %s", client_assertion);
 
@@ -212,11 +208,11 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
         connection.setRequestProperty("Accept", "application/json");
         
         Map<String, String> parameters = new HashMap<>();
-        parameters.put("grant_type", grant_type);
-        parameters.put("client_assertion_type", client_assertion_type);
+        parameters.put("grant_type", "client_credentials");
+        parameters.put("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer");
         parameters.put("client_assertion", client_assertion);
-        parameters.put("scope", scope);
-        parameters.put("client_id", client_id);
+        parameters.put("scope", "iSHARE");
+        parameters.put("client_id", keycloakOperatorPartyId);
 
         connection.setDoOutput(true);
         DataOutputStream out = new DataOutputStream(connection.getOutputStream());
@@ -255,7 +251,7 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
 
         //String tokenURL = iSHARESatelliteBaseUrl.concat(new String("/parties/").concat(callingPartyId));
         String tokenURL = iSHARESatelliteBaseUrl + "/parties/" + callingPartyId;
-        log.debugf("call %s", tokenURL);
+        log.tracef("call %s", tokenURL);
 
         URL url = new URL(tokenURL);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
@@ -284,7 +280,7 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
 
     private boolean validatePartiesToken(String partiesToken, String callingPartyId) throws Exception
     {
-        log.debug("Decode parties token");
+        log.trace("validate parties token");
         JWSInput jws = new JWSInput(partiesToken);
         if (!validateJwtCert(jws)) {
             log.error("Invalid parties token cert");
@@ -299,7 +295,7 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
 
         byte[] contentBytes = Base64Url.decode(jws.getEncodedContent());
 
-        log.debugf("iSHARE response: %s", new String(contentBytes));
+        log.tracef("token content: %s", new String(contentBytes));
         
         ISHAREPartyToken partyInfoToken = JsonSerialization.readValue(contentBytes, ISHAREPartyToken.class);
 
@@ -384,8 +380,8 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
     public void init(Config.Scope config) {
         super.init(config);
 
-        //String test = config.get("testval", "");
-        //log.debugf("TEST CONFIG VAL: %s", test);
+        String test = config.get("testval", "");
+        log.debugf("TEST CONFIG VAL: %s", test);
         
         keycloakOperatorPartyId = "NL.EORI.LIFEELEC4DMI";
         iSHARESatellitePartyId = "EU.EORI.NLDEXESDMISAT1";
