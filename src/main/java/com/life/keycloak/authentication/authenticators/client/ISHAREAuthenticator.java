@@ -161,11 +161,12 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
 
     private String createSatelliteClientAssertion()
     {
-        //PrivateKey privateKey = new PrivateKey();
         Instant now = Instant.now();
 
         String jwt = Jwts.builder()
             .header()
+            .add("typ", "JWT")
+            .add("alg", "RS256")
             .add("x5c", keycloakOperatorCert)
             .and()
             .setAudience(iSHARESatellitePartyId)
@@ -175,10 +176,22 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
             .setSubject(keycloakOperatorPartyId)
             .setNotBefore(Date.from(now))
             .setId(UUID.randomUUID().toString())
-            .signWith(keycloakOperatorPrivateKey)
+            .signWith(keycloakOperatorPrivateKey, Jwts.SIG.RS256)
             .compact();
 
         return jwt;
+    }
+
+    private String readBody(HttpURLConnection connection) throws Exception
+    {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()));
+        String inputLine;
+        StringBuffer content = new StringBuffer();
+        while ((inputLine = reader.readLine()) != null) {
+            content.append(inputLine);
+        }
+        reader.close();
+        return content.toString();
     }
     
     private String getAccessTokenFromSatellite() throws Exception
@@ -188,7 +201,7 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
         String client_id = keycloakOperatorPartyId;
         String scope = "iSHARE";
         String client_assertion = createSatelliteClientAssertion();
-        log.debugf("Call Satellite with client_assertion: %s", client_assertion);
+        log.tracef("Call Satellite with client_assertion: %s", client_assertion);
 
         String tokenURL = iSHARESatelliteBaseUrl.concat("/connect/token");
 
@@ -212,27 +225,20 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
         out.close();
 
         int status = connection.getResponseCode();
-        log.debugf("Satellite response status: %d", status);
+        log.tracef("Satellite response status: %d", status);
 
         if (status == 200) {
             /* on success: 200 OK with { access_token, token_type, expires_in } */
             /* on missing client_assertion: 200 OK with { status: false, message } */
-            BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()));
-            String inputLine;
-            StringBuffer content = new StringBuffer();
-            while ((inputLine = reader.readLine()) != null) {
-                content.append(inputLine);
-            }
-            reader.close();
+            String body = readBody(connection);
 
-            log.debugf("iSHARE Response: %s", content.toString());
-            
-            ISHARESatelliteResponse resp = JsonSerialization.readValue(content.toString(), ISHARESatelliteResponse.class);
+            ISHARESatelliteResponse resp = JsonSerialization.readValue(body, ISHARESatelliteResponse.class);
             if (resp.access_token == null || resp.access_token.isEmpty()) {
                 // no access token means error
                 log.errorf("Couldn't obtain token from Satellite: %s", resp.message != null ? resp.message : "unknown error");
                 return null;
             }
+            log.tracef("got access token: %s", resp.access_token);
             return resp.access_token;
         } else {
             log.errorf("Satellite returned error. Statuscode: %d", status);
@@ -243,6 +249,113 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
     private boolean verifyCallingPartyAtSatellite(String callingPartyId) throws Exception
     {
         String access_token = getAccessTokenFromSatellite();
+        if (access_token == null) {
+            return false;
+        }
+
+        //String tokenURL = iSHARESatelliteBaseUrl.concat(new String("/parties/").concat(callingPartyId));
+        String tokenURL = iSHARESatelliteBaseUrl + "/parties/" + callingPartyId;
+        log.debugf("call %s", tokenURL);
+
+        URL url = new URL(tokenURL);
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod("GET");
+        connection.setRequestProperty("Authorization", "Bearer " + access_token);
+        connection.setRequestProperty("Accept", "application/json");
+        connection.connect();
+        
+        int status = connection.getResponseCode();
+        if (status != 200) {
+            log.debugf("error getting parties: %d", status);
+            return false;
+        }
+
+        String body = readBody(connection);
+
+        ISHARESatellitePartiesResponse resp = JsonSerialization.readValue(body, ISHARESatellitePartiesResponse.class);
+
+        if (!validatePartiesToken(resp.party_token, callingPartyId)) {
+            log.error("Error validating parties token");
+            return false;
+        }
+        
+        return true;
+    }
+
+    private boolean validatePartiesToken(String partiesToken, String callingPartyId) throws Exception
+    {
+        log.debug("Decode parties token");
+        JWSInput jws = new JWSInput(partiesToken);
+        if (!validateJwtCert(jws)) {
+            log.error("Invalid parties token cert");
+            return false;
+        }
+
+        JsonWebToken token = jws.readJsonContent(JsonWebToken.class);
+        if (!validateJwtToken(token)) {
+            log.error("invalid parties token");
+            return false;
+        }
+
+        byte[] contentBytes = Base64Url.decode(jws.getEncodedContent());
+
+        log.debugf("iSHARE response: %s", new String(contentBytes));
+        
+        ISHAREPartyToken partyInfoToken = JsonSerialization.readValue(contentBytes, ISHAREPartyToken.class);
+
+        if (!partyInfoToken.party_info.party_id.equals(callingPartyId)) {
+            log.errorf("invalid party_id in party token: %s. Should be: %s", partyInfoToken.party_info.party_id, callingPartyId);
+            return false;
+        }
+
+        if (!partyInfoToken.party_info.adherence.status.equals("Active")) {
+            log.error("party not active");
+            return false;
+        }
+
+        return true;
+    }
+
+    private boolean validateJwtToken(JsonWebToken token) throws Exception
+    {
+        if (!token.isActive()) {
+            log.error("token is not active anymore");
+            //return false; // skip for debugging
+        }
+            
+        if (!token.hasAudience(keycloakOperatorPartyId)) {
+            log.error("invalid aud");
+            return false;
+        }
+
+        return true;
+    }
+    
+    private boolean validateJwtCert(JWSInput jws) throws Exception
+    {            
+        // unfortunately no way to get x5c otherwise
+        String encodedHeader = jws.getEncodedHeader();
+        byte[] headerBytes = Base64Url.decode(encodedHeader);
+
+        ISHAREJWSHeader header = JsonSerialization.readValue(headerBytes, ISHAREJWSHeader.class);
+
+        String[] x5c = header.getX5C();
+        if (x5c.length == 0) {
+            log.error("x5c header value empty");
+            return false;
+        }
+        log.trace("--- certs ----");
+        for (String s : x5c) {
+            log.tracef("x5c: %s", s);
+        }
+        log.trace("----------------");
+
+        X509Certificate cert = PemUtils.decodeCertificate(x5c[0]);
+
+        //List<X509Certificate> chain = new ArrayList<>();
+        //chain.add(cert);
+            
+        cert.verify(iSHARE_CA.getPublicKey());
 
         return true;
     }
@@ -251,42 +364,15 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
     {
         try {
             JWSInput jws = new JWSInput(client_assertion);
+            if (!validateJwtCert(jws)) {
+                return false;
+            }
+
             JsonWebToken token = jws.readJsonContent(JsonWebToken.class);
-            
-            // unfortunately no way to get x5c otherwise
-            String encodedHeader = jws.getEncodedHeader();
-            byte[] headerBytes = Base64Url.decode(encodedHeader);
-
-            ISHAREJWSHeader header = JsonSerialization.readValue(headerBytes, ISHAREJWSHeader.class);
-
-            String[] x5c = header.getX5C();
-            if (x5c.length == 0) {
-                log.error("x5c header value empty");
+            if (!validateJwtToken(token)) {
                 return false;
             }
-            log.debugf("--- certs ----");
-            for (String s : x5c) {
-                log.debugf("x5c: %s", s);
-            }
-            log.debug("----------------");
-
-            X509Certificate cert = PemUtils.decodeCertificate(x5c[0]);
-
-            //List<X509Certificate> chain = new ArrayList<>();
-            //chain.add(cert);
-
-            cert.verify(iSHARE_CA.getPublicKey());
             
-            if (!token.isActive()) {
-                log.error("token is not active anymore");
-                // return false; // skip for debugging
-            }
-            
-            if (!token.hasAudience(keycloakOperatorPartyId)) {
-                log.error("invalid aud");
-                return false;
-            }
-
             return verifyCallingPartyAtSatellite(token.getSubject());
         } catch (Exception e) {
             log.errorf("Exception validating client_assertion: %s", e.toString());
@@ -330,10 +416,7 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
 
             KeyFactory keyFactory = KeyFactory.getInstance("RSA");
             KeySpec keySpec = new PKCS8EncodedKeySpec(encoded);
-            //KeySpec keySpec = new RSAPrivateKeySpec(encoded);
             keycloakOperatorPrivateKey = keyFactory.generatePrivate(keySpec);
-
-            log.debugf("keycloakOperatorCert :\n%s\n", op_cert_file);
 
             // to-do: Would be nice to crash that thing when the ca file cant be loaded.
         } catch (Exception e) {
