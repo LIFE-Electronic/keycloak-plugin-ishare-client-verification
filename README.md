@@ -90,7 +90,7 @@ Flow. Also enable **Consent Required**.
 
 Go to *Credentials* tab and select `iSHARE`. Click on *SAVE*.
 Go to *Advanced* and set **User info signed response algorithm** to
-`RSA256`. Click on *SAVE*.
+`RSA256`. Also disable **Use refresh tokens**. Click on *SAVE*.
 
 Note: This will force Keycloak to return the a jwt in the `/userinfo`
 called. This response is **NOT YET** signed with the cert. We are
