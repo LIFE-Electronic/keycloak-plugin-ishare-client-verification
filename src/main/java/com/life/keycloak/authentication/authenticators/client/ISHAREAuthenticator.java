@@ -17,6 +17,8 @@ import org.keycloak.common.util.Base64Url;
 import org.keycloak.util.JsonSerialization;
 import org.keycloak.common.util.PemException;
 import org.keycloak.common.util.PemUtils;
+import org.keycloak.provider.ProviderConfigurationBuilder;
+
 
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -42,6 +44,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
 
+
 /**
  * @author <a href="mailto:markus@life-electronic.nl">Markus Pfundstein</a>
  */
@@ -58,6 +61,20 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
     private String iSHARESatellitePartyId;
     private String iSHARESatelliteBaseUrl;
     private X509Certificate iSHARE_CA;
+
+    /* not working yet
+    protected static final List<ProviderConfigProperty> configMetadata;
+
+    static {
+        configMetadata = ProviderConfigurationBuilder.create()
+                .property().name("ishare-config-file")
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("iShareConfigFile")
+                .defaultValue("${jboss.server.config.dir}/ishare.json")
+                .helpText("iSHARE config file")
+                .add().build();
+    }
+    */
 
     @Override
     public void authenticateClient(ClientAuthenticationFlowContext context) {
@@ -348,8 +365,7 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
 
         X509Certificate cert = PemUtils.decodeCertificate(x5c[0]);
 
-        //List<X509Certificate> chain = new ArrayList<>();
-        //chain.add(cert);
+        // Note: This works only if iSHARE_CA has full chain to root.
             
         cert.verify(iSHARE_CA.getPublicKey());
 
@@ -380,29 +396,33 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
     public void init(Config.Scope config) {
         super.init(config);
 
-        String test = config.get("testval", "");
-        log.debugf("TEST CONFIG VAL: %s", test);
-        
-        keycloakOperatorPartyId = "NL.EORI.LIFEELEC4DMI";
-        iSHARESatellitePartyId = "EU.EORI.NLDEXESDMISAT1";
-        iSHARESatelliteBaseUrl = "https://satellite-mw.dev.dexes.eu";
+        // TO-DO: If someone can figure out how we can use Config.Scope here,
+        // please leave an Issue on Github. For now, we slurp a config json.
 
         try {
-            String ca_file = "/home/markus/clients/dexes/ishare_certs/TESTiSHAREEUIssuingCertificationAuthorityG5-chain.pem";
-            //String u = "/home/markus/clients/dexes/ishare_certs/Test_iSHARE_EU_Issuing_Certification_Authority_G5.pem";
-            FileInputStream inStream = new FileInputStream(ca_file);
+            String keycloakHome = System.getenv("KEYCLOAK_HOME");
+            
+            String configFilePath = (keycloakHome != null ? keycloakHome : ".") + "/conf/ishare.json";
+            log.infof("use ishare config %s", configFilePath);
+            
+            String configFileContent = getFileContent(new FileInputStream(configFilePath), "utf-8");
+
+            ISHAREAuthenticatorConfig cfg = JsonSerialization.readValue(configFileContent, ISHAREAuthenticatorConfig.class);
+
+            keycloakOperatorPartyId = cfg.operatorId;
+            iSHARESatellitePartyId = cfg.satelliteId;
+            iSHARESatelliteBaseUrl = cfg.satelliteUrl;
+
+            FileInputStream inStream = new FileInputStream(cfg.ishareCaFile);
             CertificateFactory cf = CertificateFactory.getInstance("X.509");
             iSHARE_CA = (X509Certificate) cf.generateCertificate(inStream);
 
-            String op_cert_file = "/home/markus/clients/dexes/ishare_certs/lifecert.crt";
-            String op_key_file = "/home/markus/clients/dexes/ishare_certs/lifekey.pem";
-
-            keycloakOperatorCert = getFileContent(new FileInputStream(op_cert_file), "utf-8")
+            keycloakOperatorCert = getFileContent(new FileInputStream(cfg.certFile), "utf-8")
                 .replace("-----BEGIN CERTIFICATE-----", "")
                 .replaceAll(System.lineSeparator(), "")
                 .replace("-----END CERTIFICATE-----", "");
 
-            String privKeyTmp = getFileContent(new FileInputStream(op_key_file), "utf-8");
+            String privKeyTmp = getFileContent(new FileInputStream(cfg.pkFile), "utf-8");
             String privateKeyPEM = privKeyTmp
                 .replace("-----BEGIN PRIVATE KEY-----", "")
                 .replaceAll(System.lineSeparator(), "")
@@ -414,7 +434,8 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
             KeySpec keySpec = new PKCS8EncodedKeySpec(encoded);
             keycloakOperatorPrivateKey = keyFactory.generatePrivate(keySpec);
 
-            // to-do: Would be nice to crash that thing when the ca file cant be loaded.
+            // to-do: Would be nice to crash that thing when the ca file cant be loaded so that
+            // Keycloak doesn't start. But how :-)
         } catch (Exception e) {
             log.errorf("Exception during init %s", e.toString());
         }
@@ -443,7 +464,7 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
 
     @Override
     public boolean isConfigurable() {
-        return false;
+        return true;
     }
 
     @Override
@@ -463,14 +484,14 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
 
     @Override
     public List<ProviderConfigProperty> getConfigPropertiesPerClient() {
+        // doesnt seem to work yet:
+        // https://keycloak.discourse.group/t/custom-per-client-configurable-clientauthenticator/24226
+        // return configMetadata;
         return Collections.emptyList();
     }
 
     @Override
     public Map<String, Object> getAdapterConfiguration(ClientModel client) {
-        //Map<String, Object> result = new HashMap<>();
-        //result.put("ishare-satellite-url", "");
-        //return result;
         return Collections.emptyMap();
     }
 
