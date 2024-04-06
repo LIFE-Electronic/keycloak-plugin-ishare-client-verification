@@ -1,5 +1,7 @@
 # iSHARE Client Authenticator Plugin
 
+Maintainer: markus (at) life-electronic (dot) nl
+
 This Keycloak plugin implements the Client Authenticator Flow for
 iSHARE.
 
