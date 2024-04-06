@@ -7,7 +7,9 @@ Maintainer: markus (at) life-electronic (dot) nl
 ## Introduction
 
 This Keycloak plugin implements the iSHARE OIDC Authentication Flow for
-H2M authentication [Link](https://dev.ishare.eu/reference/authentication.html).
+H2M authentication (
+[Link](https://dev.ishare.eu/reference/authentication.html)) up to
+providing an `access_token` to the Service Provider.
 
 Tested with Keycloak-24.0.2.
 
