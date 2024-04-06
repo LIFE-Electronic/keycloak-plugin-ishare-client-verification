@@ -1,11 +1,18 @@
 # iSHARE Client Authenticator Plugin
 
+## Contact
+
 Maintainer: markus (at) life-electronic (dot) nl
 
-This Keycloak plugin implements the Client Authenticator Flow for
-iSHARE.
+## Introduction
+
+This Keycloak plugin implements the iSHARE OIDC Authentication Flow for
+H2M authentication [Link](https://dev.ishare.eu/reference/authentication.html).
 
 Tested with Keycloak-24.0.2.
+
+Note: It does not implement the functionality of the Human
+Authorization Registry.
 
 ## Installation
 
@@ -37,7 +44,7 @@ The config must look like this. All fields are mandatory.
 
 #### ishare-ca-file
 
-The iSHARE ca-file can be obtained from iSHARE. Must include the whole
+The iSHARE ca-file can be obtained from [iSHARE](https://ca7.isharetest.net:8442/ejbca/retrieve/ca_certs.jsp). Must include the whole
 chain to the root.
 
 #### operator-cert-file
