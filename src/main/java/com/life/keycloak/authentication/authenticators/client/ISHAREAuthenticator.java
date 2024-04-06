@@ -333,7 +333,7 @@ public class ISHAREAuthenticator extends AbstractClientAuthenticator {
     {
         if (!token.isActive()) {
             log.error("token is not active anymore");
-            //return false; // skip for debugging
+            return false; // skip for debugging
         }
             
         if (!token.hasAudience(keycloakOperatorPartyId)) {
